@@ -1,0 +1,70 @@
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict'),{performance}=require('node:perf_hooks');
+const {readBatch,compact}=require('./flow-records.cjs');
+const html=fs.readFileSync(path.join(__dirname,'index.html'),'utf8'),script=/<script>([\s\S]*?)<\/script>/.exec(html)[1];
+new vm.Script(script);
+// Contratos da leitura incremental: UTF8, ultima linha parcial, append e limite de previa.
+const fixture=path.join(__dirname,'.reader-test.jsonl');
+try {
+ fs.writeFileSync(fixture,JSON.stringify({text:'ação 🧠'})+'\n'+JSON.stringify({text:'segunda'}));
+ const state={offset:0,pending:Buffer.alloc(0)},rows=[];while(state.offset<fs.statSync(fixture).size)rows.push(...readBatch(fixture,state,7));
+ assert.equal(rows.length,1);assert.equal(rows[0].text,'ação 🧠');fs.appendFileSync(fixture,'\n');rows.push(...readBatch(fixture,state,7));assert.equal(rows[1].text,'segunda');
+ assert(compact('x'.repeat(1000000)).length<33000);assert.equal(compact('data:image/png;base64,AAAA'),'');
+} finally {fs.unlinkSync(fixture)}
+// DOM minimo para testar ciclo real render/pan/fold sem depender do navegador instalado.
+const elements=new Map();
+class Element {
+ constructor(tag){this.tag=tag;this.children=[];this.style={setProperty(k,v){this[k]=v}};this.classes=new Set();this.classList={add:x=>this.classes.add(x),remove:x=>this.classes.delete(x),toggle:(x,on)=>on?this.classes.add(x):this.classes.delete(x)};this.value='';this.clientWidth=1200;this.clientHeight=800;this.attrs={};}
+ set textContent(v){this.text=String(v);this.children.forEach(e=>e.parent=null);this.children=[]}get textContent(){return this.text||''}
+ set innerHTML(v){this.textContent=v}get innerHTML(){return this.textContent}
+ set id(v){this._id=v;elements.set(v,this)}get id(){return this._id}
+ appendChild(e){if(e.parent)e.remove();this.children.push(e);e.parent=this;return e}prepend(e){this.children.unshift(e);e.parent=this}
+ remove(){if(this.parent){const i=this.parent.children.indexOf(this);if(i>=0)this.parent.children.splice(i,1)}this.parent=null}
+ get isConnected(){return !!this.parent}get firstChild(){return this.children[0]}get lastChild(){return this.children[this.children.length-1]}
+ setAttribute(k,v){this.attrs[k]=String(v)}addEventListener(){}removeEventListener(){}focus(){}
+ querySelector(q){if(q==='defs')return defs;if(q==='.lb b')return this.children.find(e=>e.className==='lb').children[0];return null}
+ getBoundingClientRect(){return {left:0,top:0,right:1200,bottom:800}}
+}
+const defs=new Element('defs'),svg=new Element('svg');svg.appendChild(defs);
+for(const id of html.matchAll(/id="([^"]+)"/g)){let e=new Element('div');e.id=id[1];}
+elements.get('wg').ownerSVGElement=svg;elements.get('follow').checked=false;
+const document={hidden:false,getElementById:id=>elements.get(id)||null,createElement:t=>new Element(t),createElementNS:(_,t)=>new Element(t)};
+const context={document,console,performance,Map,Set,Math,Date,Number,JSON,encodeURIComponent,setInterval(){},requestAnimationFrame(){},addEventListener(){},removeEventListener(){},fetch:async()=>({json:async()=>[]}),EventSource:class {addEventListener(){}close(){}}};
+vm.createContext(context);vm.runInContext(script,context);
+for(let i=0;i<120;i++){const root=context.add('user','Pedido '+i,'',new Date().toISOString());root.turnComplete=true;for(let j=0;j<22;j++)context.add(j%3?'tool':'think','Teste','',new Date().toISOString(),{sat:'ok'});}
+const renderAt=performance.now();context.render();const renderMs=performance.now()-renderAt;
+assert(context.steps.length===2760);assert(context.steps.filter(s=>s.el).length<100,'Historico oculto nao deve criar DOM');
+context.historyView.folded=false;context.sc=1;context.tx=0;context.ty=0;context.drawGraph();const mounted=context.steps.filter(s=>s.el).length;
+assert(mounted<300,'Viewport deve limitar DOM');
+const oldPath=elements.get('wg').firstChild;context.drawGraph();assert.equal(elements.get('wg').firstChild,oldPath,'SVG deve reutilizar paths');
+context.physics.heat=0;context.sc=2;context.updateZoomLabels();context.drawGraph();assert.equal(context.physics.heat,0,'Zoom e foco nao devem reiniciar fisica');
+const beforeNav=context.steps.map(s=>[s.cx,s.cy]);context.physics.navigationUntil=2000;context.physics.heat=1;context.dirty=false;context.animateGraph(1000);assert(context.steps.some((s,i)=>s.cx!==beforeNav[i][0]||s.cy!==beforeNav[i][1]),'Movimento organico deve continuar durante navegacao');context.physics.navigationUntil=0;context.sc=1;
+const minor=context.steps.find(s=>s.kind==='tool'&&s.parent&&s.parent.kind==='tool');context.sc=2;assert.equal(context.nodeSize(minor),28,'Tamanho do zoom deve existir no modelo');context.sc=1;assert.equal(context.nodeSize(minor),12);
+const orbitRoot={kind:'user',areaRadius:300,turn:4},orbitNode={kind:'web',size:32,treeRoot:orbitRoot};context.physics.degree=new Map();context.physics.edges=[];
+const orbitBase=context.orbitOutset(orbitNode);context.physics.degree.set(orbitNode,9);const orbitConnected=context.orbitOutset(orbitNode);orbitRoot.areaRadius=1000;const orbitLargeProject=context.orbitOutset(orbitNode);
+assert(orbitConnected>orbitBase,'Orbita deve crescer com mais conexoes');assert(orbitLargeProject>orbitConnected,'Orbita deve crescer com o tamanho do projeto');assert(context.orbitOutset({kind:'user',size:84,areaRadius:300})>orbitBase,'Pedido mais importante deve ter orbita mais ampla');
+assert(html.includes("'Departure Mono'")&&html.includes("radial-gradient(var(--dot)"),'Tema deve usar Departure Mono e malha de pontos');
+const thought=context.steps.find(s=>s.kind==='think');assert(!/[{};]|exec_command/.test(context.activitySummary(thought)),'Resumo de atividade nao deve exibir codigo');
+context.tx=-10000;context.applyT(false);assert(context.steps.filter(s=>s.el).length<mounted,'Pan deve liberar DOM fora da tela');
+context.working=true;context.steps[0].sat='pending';const last=context.steps.at(-1);assert.equal(context.processingNode(new Set([last])),last,'Spinner nao pode ficar no comando de um pedido antigo');
+context.steps.push({turn:2,sat:'pending',kind:'tool'});assert.equal(context.processingNode(new Set([last,context.steps.at(-1)])),last,'Log tardio do subagente nao pode roubar spinner');context.steps.pop();
+assert.equal(context.agentAssignment({agentPath:'/root/agente_otimizacao'}),'Agente otimizacao');
+assert.equal(context.actionSummary({kind:'tool',cmd:'Get-Content arquivo.txt'}),'Leu arquivos para consultar informações.');assert.match(context.resultSummary({kind:'tool',sat:'err',out:'EACCES permission denied'}),/acesso ou permissão/);assert.match(context.resultSummary({kind:'tool',sat:'pending'}),/andamento/);
+const human=context.steps.find(s=>s.kind==='tool');human.cmd='console.log(SECRET_CODE)';human.out='SECRET_OUTPUT';human.sat='ok';context.panel(human);assert(!elements.get('pc').children.some(e=>/SECRET_CODE|SECRET_OUTPUT/.test(e.textContent)),'Flutuante deve mostrar resumo sem codigo ou saida bruta');
+const a={cx:0,cy:0,size:84,kind:'user'},b={cx:100,cy:100,size:32};assert.match(context.routedLink({a,b}),/ L/);assert(!/[QC]/.test(context.routedLink({a,b})));
+context.resetAll();context.add('user','Recursos','',new Date().toISOString());const patch='*** Begin Patch\n*** Update File: exemplo.js\n@@\n-antigo\n+novo\n*** End Patch';context.call({name:'apply_patch',input:patch,call_id:'patch-test'},new Date().toISOString());const file=context.steps.find(s=>s.kind==='file');assert.equal(file.resourcePath,'exemplo.js');assert.match(file.resourceDiff,/-antigo\n\+novo/);const resourceEdge=context.graphEdges().find(e=>e.resource);assert.equal(resourceEdge.a,file);assert.equal(resourceEdge.b,context.calls['patch-test'],'Seta deve ir do arquivo ao comando');
+context.call({name:'exec',arguments:JSON.stringify({code:'await tools.apply_patch('+JSON.stringify(patch)+'); await tools.apply_patch('+JSON.stringify(patch.replace('exemplo.js','outro.js'))+')'}),call_id:'nested-test'},new Date().toISOString());assert.equal(context.calls['nested-test'].resources.length,2,'Deve detectar patches dentro de chamadas compostas');
+const owner=context.calls['patch-test'];owner.cx=100;owner.cy=0;owner.size=56;owner.parent={cx:0,cy:0};file.size=32;const outward=context.resourceTarget(file);assert(outward.x>owner.cx);assert(Math.abs(outward.y)<.001,'Recurso unico deve ficar oposto a entrada do comando');
+const uncImage="\\\\server\\share\\pasta d'arte\\foto.png";assert.equal(context.viewedImagePath('tools.view_image({path:'+JSON.stringify(uncImage)+'})'),uncImage,'Caminho de imagem deve preservar UNC e apostrofo');
+assert(outward.x-owner.cx<140,'Arquivo deve ficar perto do comando');const requestA={kind:'user',size:84,areaRadius:300},requestB={kind:'user',size:84,areaRadius:500},hub={kind:'tool',size:56},leaf={kind:'tool',size:12};context.physics.spacing=1;assert.equal(context.edgeLength({a:requestA,b:requestB,root:true}),960,'Tronco deve preservar a regra anterior');assert(context.edgeLength({a:requestA,b:hub})>215,'Primeiro nivel deve aumentar um pouco');assert(context.edgeLength({a:hub,b:leaf})<120,'Segundo nivel deve encurtar');
+context.call({name:'view_image',arguments:JSON.stringify({path:'C:/teste/imagem.png'}),call_id:'image-test'},new Date().toISOString());assert(context.calls['image-test'].resources[0].resourceImage);context.call({name:'exec_command',arguments:JSON.stringify({cmd:"Get-Content -LiteralPath 'pasta/arquivo.txt'"}),call_id:'read-test'},new Date().toISOString());assert.equal(context.calls['read-test'].resources[0].resourcePath,'pasta/arquivo.txt');
+context.call({name:'functions.exec',type:'custom_tool_call',input:'const r = await tools.view_image({path:"C:/teste/imagem.png"}); image(r.image_url);',call_id:'raw-image'},new Date().toISOString());assert.equal(context.calls['raw-image'].kind,'img','Imagem em chamada freeform deve ser reconhecida');assert(context.calls['raw-image'].resources[0].resourceImage);context.graphEdges();context.requestAreas();assert(context.physics.areaRoots[0].areaRadius>=500,'Area deve reservar espaco para arquivos externos');assert(html.includes("url('/assets/setas.svg')"));assert(fs.readFileSync(path.join(__dirname,'assets/setas.svg'),'utf8').includes('<svg'));
+const big=context.linkMarker({a},'#448aff'),small=context.linkMarker({a:{size:12}},'#448aff');assert.notEqual(big,small);
+context.render();const picture=context.calls['raw-image'].resources[0];context.focus(picture);context.drawGraph();assert(picture.el);assert.equal(picture.el.style.backgroundImage,'','Imagem no grafo nao deve carregar miniatura');assert.equal(picture.el.firstChild.style.display,'','Icone deve permanecer visivel');
+// Mesmo conjunto sintetico nas duas versoes: cronometra calculo, nao FPS/RAM do VS Code.
+const backup=path.resolve(__dirname,'../../.backups/codex-flow-performance-2026-10-28/index.html');
+function environment(source){const c={steps:[],isFolded:()=>false,Math,Number,Map,Set,performance,sc:1,physics:{heat:.1,spacing:1,repel:45,edges:[],center:35,link:55,distance:90,settlePass:0},historyView:{focusRoot:null}};vm.createContext(c);vm.runInContext(source.slice(source.indexOf('var routedSegments='),source.indexOf('function drawGraph(){')),c);vm.runInContext(source.slice(source.indexOf('function physicsStep()'),source.indexOf('var oldPaintSel=')),c);return c;}
+function bench(source){const c=environment(source);for(let i=0;i<100;i++)c.steps.push({cx:(i%10)*170,cy:Math.floor(i/10)*170,size:32,kind:'tool'});const edges=c.steps.slice(1).map((b,i)=>({a:c.steps[i],b}));let t=performance.now();edges.forEach(e=>c.routedLink(e));const linksMs=performance.now()-t;c.steps=[];for(let i=0;i<1500;i++)c.steps.push({cx:(i%50)*180,cy:Math.floor(i/50)*180,size:32,kind:'tool'});t=performance.now();c.physicsStep();return {linksMs:+linksMs.toFixed(2),physicsMs:+(performance.now()-t).toFixed(2)};}
+const result={nodes:2760,mounted,renderMs:+renderMs.toFixed(2),before:bench(fs.readFileSync(backup,'utf8')),after:bench(html)};
+const settling=environment(html);settling.physics.heat=1;settling.steps=[{cx:0,cy:0,size:56,kind:'tool'},{cx:20,cy:20,size:32,kind:'tool'}];let ticks=0;while(settling.physics.heat>.008&&ticks<400){settling.physicsStep();ticks++}assert.equal(settling.physics.heat,0,'Movimento deve descansar quando acomodar');assert(ticks>45,'Nao deve cortar o movimento aos45 passos');assert(Math.hypot(settling.steps[1].cx-settling.steps[0].cx,settling.steps[1].cy-settling.steps[0].cy)>60,'Colisao deve separar os nos suavemente');
+assert(result.after.linksMs<result.before.linksMs);console.log('PASS: leitura, virtualizacao, pan, SVG reutilizado, spinner, atribuicao e setas retas.');console.log(JSON.stringify(result,null,2));

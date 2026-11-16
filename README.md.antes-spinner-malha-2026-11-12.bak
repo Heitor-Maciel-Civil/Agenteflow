@@ -1,0 +1,71 @@
+# Codex Flow
+
+Servidor e visualizador local das sessoes do Codex. Inicio manual: `node start-server.cjs`.
+Endereco: http://localhost:4455
+
+No VS Code deste workspace, a tarefa `Codex Flow - servidor` inicia automaticamente.
+A extensao local `Heitor - Inicializar Codex Flow` abre a guia no navegador integrado.
+O terminal fica separado do Codex CLI; fechar a guia nao encerra o servidor.
+
+Esta e a copia operacional no repositorio. A pasta original `C:\Users\hreis\Downloads\worklow` foi preservada.
+Instalacao e verificacao: `Repositorio/Infraestrutura/CodexFlowStartup/README.md`.
+
+Desempenho: somente nos do viewport sao montados; a fisica usa vizinhanca espacial,
+ate 30 atualizacoes/s durante acomodacao e pausa em guia oculta. A distancia muda
+gradualmente no zoom; o movimento desacelera por energia, sem corte por tempo.
+Comandos aparecem como resumo da acao e resultado, sem codigo bruto. Links sao retas
+com marcadores de destino reutilizados. Logs chegam em blocos de 256 KB, com
+previas textuais limitadas a 32 KB por campo e imagens locais carregadas sob demanda.
+Os JSONL originais permanecem integrais. Teste: `node performance.test.cjs`.
+
+Arquivos e imagens com caminhos explicitos ganham nos ligados ao comando que os
+utilizou (recurso -> comando). Ficam em leque externo, proximo de 180 graus da
+entrada do comando, com atracao local ao comando. Clique abre diff registrado no
+patch ou previa atual de leitura/imagem no flutuante. Sem patch registrado, nao se
+inventa comparacao historica. Previas de texto limitadas a256KB e carregadas no clique.
+
+Cada pedido reserva area proporcional aos seus ramos e recursos; links entre pedidos
+respeitam esse alcance e os ramos usam atracao local. O indicador de carregamento
+usa `assets/setas.svg`, copia do SVG fornecido pelo usuario. Chamadas view_image em
+codigo freeform tambem sao reconhecidas. Imagens aparecem somente como icone no
+grafo; os bytes sao carregados apenas ao clicar, sem miniatura automatica.
+
+O servidor preserva imagens registradas em `data/images`, antes de remover base64
+dos eventos enviados ao navegador. Copias em disco sao deduplicadas e identificadas
+por sessao/caminho/chamada, preservando reutilizacoes de arquivos temporarios.
+O original pode ser apagado depois da captura. Imagens antigas ja apagadas e sem
+dados recuperaveis no log nao podem ser reconstruidas. Teste: `node image-store.test.cjs`.
+
+Comprimentos por hierarquia: pedido -> hub um pouco maior, hub -> secundarios
+mais curto, recursos em leque compacto de ate3 por faixa. A regra do tronco entre
+pedidos e preservada. Ramos compartilham um lado do tronco, com margem suave para
+reduzir cruzamentos das linhas secundarias com a ligacao principal.
+
+A interface usa tema monocromatico, glifos `.` nitidos na malha e a fonte local
+`Departure Mono` (com fallback monospace). A malha acompanha pan/zoom e tem tres
+densidades: abaixo de 0,35, grade espacada e apenas baloes de pedidos; de 0,35 a
+1,2, grade media e todos os nos; acima de 1,2, grade fina. O cursor movimenta uma
+resposta local com leve atraso e deformacao organica tipo geoide: o limite que revela
+os pontos tem variacao horizontal e ondulacoes que aumentam em amplitude e frequencia
+com a velocidade do cursor, com uma faixa de transicao suave que mantem largura visual
+no zoom. O realce ilumina apenas os pontos de intersecao da malha, mantendo estaticos
+os glifos tipograficos do fundo. Uma malha ortogonal adicional de linhas discretas e
+pontos nas intersecoes ocupa somente o viewport e uma margem, permanece alinhada
+durante pan/zoom e se deforma localmente em torno do cursor suavizado; cada ponto
+iluminado acrescenta uma forca secundaria fraca, limitada em conjunto a 30% da
+deformacao principal, sem alterar nos, links ou fisica do historico. Movimento reduzido
+mantem a malha sem deformacao. O cursor nao exibe um circulo em volta. Nao ha glow
+continuo.
+As orbitas e os contornos dos nos
+permanecem circulares. As conexoes
+ficam solidas e so a linha clicada vira um rastro de hifens `-` animado; hover nao
+inicia essa animacao. Selecionar um no revela tres niveis de atracao: raios e forcas
+usam importancia, conexoes e tamanho do pedido; o zoom altera a exibicao, nao a forca
+do campo. O no selecionado tambem recupera a orbita pontilhada giratoria, com
+velocidade lenta e passos discretos. Os tres aneis de forca percorrem seus tracos em
+velocidades diferentes e escurecem progressivamente para fora. A grade, os glifos e
+as linhas SVG usam antialiasing de qualidade geometrica em vez de bordas forcadas
+pixel a pixel. Os nos de maior importancia usam tons de cinza mais claros. A animacao
+de processamento mostra oito pontos estacionarios ao redor do no ativo: o brilho
+percorre os pontos sem desloca-los, e o diametro acompanha o tamanho do no. Todas as
+animacoes respeitam `prefers-reduced-motion`.

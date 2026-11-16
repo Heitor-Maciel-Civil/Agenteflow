@@ -1,0 +1,7 @@
+{
+  "name": "heitor-codex-flow",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": { "start": "node start-server.cjs" }
+}

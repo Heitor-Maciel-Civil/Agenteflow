@@ -1,0 +1,136 @@
+// Codex Flow: visualizador em tempo real das sessões do Codex CLI.
+// Uso: node codex-flow.js   (depois abra http://localhost:4455)
+// Só LÊ os arquivos em ~/.codex/sessions. Não altera nada e não envia dados para fora.
+const http = require('http'), fs = require('fs'), path = require('path'), os = require('os');
+const PORT = +process.env.PORT || 4455;
+const ROOT = path.resolve(path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions'));
+const { readBatch } = require('./flow-records.cjs');
+const {ImageStore}=require('./image-store.cjs');
+const imageStore=new ImageStore(path.join(__dirname,'data','images'));
+function captureImage(session,record){imageStore.capture(session,record,sessionMeta(session).cwd||process.cwd())}
+const imageReferences=new Map();
+function referencedImage(file,imagePath){const target=imagePath.toLowerCase().replace(/\\+/g,'/'),key=file+'\n'+target;if(imageReferences.has(key))return true;
+ const fd=fs.openSync(file,'r'),buffer=Buffer.allocUnsafe(65536);let tail='',found=false;try{for(;;){const n=fs.readSync(fd,buffer,0,buffer.length,null);if(!n)break;const text=tail+buffer.subarray(0,n).toString('utf8').toLowerCase().replace(/\\+/g,'/');if(text.includes(target)){found=true;break}tail=text.slice(-target.length*2)}}finally{fs.closeSync(fd)}if(found){imageReferences.set(key,true);if(imageReferences.size>128)imageReferences.delete(imageReferences.keys().next().value)}return found;}
+
+function walk(d, out) {
+  let es; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return out; }
+  for (const e of es) {
+    const p = path.join(d, e.name);
+    if (e.isDirectory()) walk(p, out);
+    else if (/^rollout-.*\.jsonl$/.test(e.name)) {
+      try { const s = fs.statSync(p); out.push({ f: path.relative(ROOT, p).split(path.sep).join('/'), m: s.mtimeMs, s: s.size }); } catch {}
+    }
+  }
+  return out;
+}
+const metaCache = new Map();
+function sessionMeta(f) {
+  if (metaCache.has(f)) return metaCache.get(f);
+  try {
+    const fd = fs.openSync(path.join(ROOT, f), 'r'), b = Buffer.alloc(131072);
+    let n; try { n = fs.readSync(fd, b, 0, b.length, 0); } finally { fs.closeSync(fd); }
+    const first = b.subarray(0, n).toString('utf8').split('\n')[0];
+    const meta = JSON.parse(first).payload || {}; metaCache.set(f, meta); return meta;
+  } catch { return {}; }
+}
+// Um agente filho nunca deve substituir a conversa principal no modo automático.
+let latestAt = 0, latestRows = [];
+const latest = () => { if (Date.now() - latestAt < 3000) return latestRows; latestAt = Date.now(); return latestRows = walk(ROOT, []).sort((a, b) => b.m - a.m).filter(s => {
+  const m = sessionMeta(s.f); return !m.parent_thread_id && !(m.source && m.source.subagent);
+}); };
+
+const briefCache = new Map();
+function sessionNames() {
+  const names = new Map();
+  try { for (const line of fs.readFileSync(path.join(path.dirname(ROOT), 'session_index.jsonl'), 'utf8').split('\n')) { try { const s = JSON.parse(line); if (s.thread_name) names.set(s.id, s.thread_name); } catch {} } } catch {}
+  return names;
+}
+function sessionBrief(s, names) {
+  const meta = sessionMeta(s.f), cached = briefCache.get(s.f);
+  if (cached && cached.s === s.s && cached.sourceM === s.m) return { ...cached, title: names.get(meta.id) || cached.title };
+  let first = '', last = '', activity = s.m;
+  try {
+    const fd = fs.openSync(path.join(ROOT, s.f), 'r');
+    const read = (position, length) => { const b = Buffer.alloc(length); return b.subarray(0, fs.readSync(fd, b, 0, length, position)).toString('utf8'); };
+    let chunks; try { chunks = [read(0, Math.min(s.s, 524288)), read(Math.max(0, s.s - 262144), Math.min(s.s, 262144))]; } finally { fs.closeSync(fd); }
+    for (const chunk of chunks) for (const line of chunk.split('\n')) { try {
+      const o = JSON.parse(line), p = o.payload || {}; const timestamp = Date.parse(o.timestamp); if (Number.isFinite(timestamp)) activity = Math.max(activity, timestamp); if (o.type !== 'response_item' || p.type !== 'message' || p.role !== 'user') continue;
+      const text = (p.content || []).map(c => c.text || '').filter(t => t.trim() && !/^\s*(<|# AGENTS\.md)/.test(t)).join(' ').replace(/\s+/g, ' ').trim();
+      if (text) { if (!first) first = text; last = text; }
+    } catch {} }
+  } catch {}
+  const info = { ...s, m: activity, sourceM: s.m, id: meta.id, title: names.get(meta.id) || first.slice(0, 90) || 'Conversa sem título', summary: first.slice(0, 220), cwd: meta.cwd || '' };
+  briefCache.set(s.f, info); return info;
+}
+http.createServer((req, res) => {
+  const u = new URL(req.url, 'http://localhost');
+  if(u.pathname==='/assets/setas.svg'){res.writeHead(200,{'Content-Type':'image/svg+xml','Cache-Control':'no-cache'});return res.end(fs.readFileSync(path.join(__dirname,'assets','setas.svg')))}
+  if(u.pathname==='/api/resource'){
+    const relative=u.searchParams.get('f')||'',file=path.resolve(ROOT,relative),requested=u.searchParams.get('path')||'';
+    try{if(!relative||!file.startsWith(ROOT+path.sep)||!requested||!referencedImage(file,requested))throw Error();const full=path.resolve(sessionMeta(relative).cwd||process.cwd(),requested),stat=fs.statSync(full);if(!stat.isFile())throw Error();
+      const fd=fs.openSync(full,'r'),buffer=Buffer.alloc(Math.min(stat.size,262144));let n;try{n=fs.readSync(fd,buffer,0,buffer.length,0)}finally{fs.closeSync(fd)}if(buffer.subarray(0,n).includes(0))throw Error();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});return res.end(JSON.stringify({content:buffer.subarray(0,n).toString('utf8'),truncated:stat.size>n}));
+    }catch{res.writeHead(404);return res.end('{}')}
+  }
+  if (u.pathname === '/api/image') {
+    const relative=u.searchParams.get('f')||'',file = path.resolve(ROOT,relative),requested=u.searchParams.get('path')||'';
+    const ext = path.extname(requested).toLowerCase(), mime = {'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif','.bmp':'image/bmp'}[ext];
+    try {
+      if (!relative||!requested||!file.startsWith(ROOT + path.sep) || !mime) throw Error('invalid');const imagePath=path.resolve(sessionMeta(relative).cwd||process.cwd(),requested);
+      const key=u.searchParams.get('k')||'';let cached=imageStore.get(relative,requested,key);if(!cached){if(!referencedImage(file,requested))throw Error('not referenced');cached=imageStore.preserve(relative,requested,key,sessionMeta(relative).cwd||process.cwd())}if(!cached)throw Error('unavailable');
+      res.writeHead(200, {'Content-Type':cached.mime,'Cache-Control':'private, max-age=60','X-Content-Type-Options':'nosniff'});
+      const stream=fs.createReadStream(cached.full);stream.on('error',()=>res.destroy());return stream.pipe(res);
+    } catch { res.writeHead(404); return res.end(); }
+  }
+  if (u.pathname === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(fs.readFileSync(path.join(__dirname, 'index.html')));
+  }
+  if (u.pathname === '/api/agent') {
+    const parent = u.searchParams.get('parent'), agent = u.searchParams.get('agent');
+    const entry = walk(ROOT, []).find(s => { const m = sessionMeta(s.f); return m.parent_thread_id === parent && m.agent_path === agent; });
+    if (!entry) { res.writeHead(404); return res.end('{}'); }
+    const file=path.join(ROOT,entry.f),after=Math.max(0,Number(u.searchParams.get('after'))||0),state={offset:after,pending:Buffer.alloc(0),onRecord:o=>captureImage(entry.f,o)},records=[];
+    let ownTurn=u.searchParams.get('own')==='1';
+    let batch=readBatch(file,state);for(let i=0;i<32&&state.offset-state.pending.length===after&&state.offset<fs.statSync(file).size;i++)batch.push(...readBatch(file,state));
+    for(const o of batch){const p=o.payload||{};if(o.type==='event_msg'&&p.type==='task_started'&&p.root_turn_id&&p.turn_id!==p.root_turn_id)ownTurn=true;
+      if(ownTurn&&o.type==='response_item'&&/^(function_call|custom_tool_call|function_call_output|custom_tool_call_output|reasoning)$/.test(p.type))records.push(o);}
+    const next=state.offset-state.pending.length,caught=next>=fs.statSync(file).size;
+    res.writeHead(200, { 'Content-Type':'application/json','Cache-Control':'no-store','X-Flow-Caught-Up':String(caught),'X-Flow-Cursor':String(next),'X-Flow-Own':ownTurn?'1':'0','X-Flow-File':entry.f });return res.end(JSON.stringify(records));
+  }
+  if (u.pathname === '/api/sessions') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const names = sessionNames();
+    return res.end(JSON.stringify(latest().slice(0, 120).map(s => sessionBrief(s, names)).sort((a,b) => b.m - a.m)));
+  }
+  if (u.pathname === '/events') {
+    let f = u.searchParams.get('f') || '';
+    const auto = !f;
+    if (auto) { const l = latest()[0]; f = l ? l.f : ''; }
+    const full = path.resolve(ROOT, f);
+    if (!f || !full.startsWith(ROOT + path.sep)) { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.write('event: empty\ndata: {}\n\n'); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.write('event: file\ndata: ' + JSON.stringify(f) + '\n\n');
+    const state={offset:0,pending:Buffer.alloc(0),onRecord:o=>captureImage(f,o)}; let scheduled=false;
+    const pump = () => {
+      let st; try { st = fs.statSync(full); } catch { return; }
+      if (res.destroyed || res.writableNeedDrain || st.size === state.offset) return;
+      const records=readBatch(full,state);
+      if(records.length)res.write('data: '+JSON.stringify(records.map(o=>JSON.stringify(o)))+'\n\n');
+      if(state.offset<st.size&&!scheduled&&!res.writableNeedDrain){scheduled=true;setImmediate(()=>{scheduled=false;pump()});}
+    };
+    pump();
+    res.on('drain',pump);
+    const t1 = setInterval(pump, 400);
+    const t2 = setInterval(() => {
+      if (!auto) return;
+      const l = latest()[0];
+      if (l && l.f !== f) res.write('event: switch\ndata: ' + JSON.stringify(l.f) + '\n\n');
+    }, 3000);
+    req.on('close', () => { clearInterval(t1); clearInterval(t2); });
+    return;
+  }
+  res.writeHead(404); res.end();
+}).listen(PORT, '127.0.0.1', () => {
+  console.log('Codex Flow rodando em http://localhost:' + PORT);
+  console.log('Lendo sessões de: ' + ROOT);
+});
