@@ -9,8 +9,21 @@ const ROOT = ROOTS.codex;
 const { readBatch } = require('./flow-records.cjs');
 const {ImageStore}=require('./image-store.cjs');
 const { AgentStatusStore } = require('./agent-status.cjs');
+const { createDispatchBus, buildSpecialistPrompt } = require('./dispatch-bus.cjs');
+const { createActionStore } = require('./action-store.cjs');
 const agentStatusStore = new AgentStatusStore();
 const imageStore=new ImageStore(path.join(__dirname,'data','images'));
+const dispatchBus = createDispatchBus({
+  inboxDir: path.join(__dirname, 'data', 'inbox'),
+  workspaceRoot: path.resolve(__dirname, '..', '..'),
+  enableCliDispatch: process.env.FLOW_CLI_DISPATCH !== '0'
+});
+const actionStore = createActionStore({
+  decisionsDir: path.join(__dirname, 'data', 'decisions'),
+  readyDir: path.resolve(__dirname, '..', 'Integracoes', 'PlanCanvas', 'ready'),
+  workspaceRoot: path.resolve(__dirname, '..', '..'),
+  dispatchBus
+});
 function sessionCwd(key) {
   const resolved = resolveSession(key, ROOTS);
   if (!resolved || resolved.provider !== 'codex') return process.cwd();
@@ -62,6 +75,175 @@ http.createServer((req, res) => {
     });
     return res.end(JSON.stringify(snap));
   }
+  if (u.pathname === '/api/specialists' && req.method === 'GET') {
+    const skillsDir = path.resolve(__dirname, '..', '..', '.agents', 'skills');
+    const items = [];
+    try {
+      for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const dir = path.join(skillsDir, entry.name);
+        const skillPath = path.join(dir, 'SKILL.md');
+        const memoryPath = path.join(dir, 'memoria.md');
+        if (!fs.existsSync(skillPath) || !fs.existsSync(memoryPath)) continue;
+        const raw = fs.readFileSync(skillPath, 'utf8');
+        const descMatch = raw.match(/^description:\s*(.+)$/m);
+        const areaMatch = raw.match(/^area:\s*(.+)$/m);
+        const iconMatch = raw.match(/^icon:\s*(.+)$/m);
+        items.push({
+          id: entry.name,
+          name: entry.name.replace(/-/g, ' '),
+          area: areaMatch ? areaMatch[1].trim() : 'Geral',
+          icon: iconMatch ? iconMatch[1].trim() : 'default',
+          description: descMatch ? descMatch[1].trim() : '',
+          skillPath: '.agents/skills/' + entry.name + '/SKILL.md',
+          memoryPath: '.agents/skills/' + entry.name + '/memoria.md'
+        });
+      }
+    } catch {}
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    return res.end(JSON.stringify(items));
+  }
+  if (u.pathname === '/api/specialists/link') {
+    const linkFile = path.join(__dirname, 'data', 'linked-specialist.json');
+    const normalizeLinked = raw => {
+      const arr = Array.isArray(raw) ? raw : (raw && raw.id ? [raw] : []);
+      return arr
+        .filter(item => item && item.id)
+        .map(item => ({
+          id: String(item.id),
+          skillPath: String(item.skillPath || ''),
+          memoryPath: String(item.memoryPath || ''),
+          ...(typeof item.note === 'string' && item.note.trim() ? { note: item.note.trim() } : {}),
+          ...(item.targetNodeId ? { targetNodeId: String(item.targetNodeId) } : {}),
+          linkedAt: item.linkedAt || Date.now()
+        }));
+    };
+    if (req.method === 'GET') {
+      let current = [];
+      try { current = normalizeLinked(JSON.parse(fs.readFileSync(linkFile, 'utf8'))); } catch {}
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify(current));
+    }
+    if (req.method === 'POST') {
+      if (!isLocalAgentRequest(req)) { res.writeHead(403); return res.end('[]'); }
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null');
+          fs.mkdirSync(path.dirname(linkFile), { recursive: true });
+          let prev = [];
+          try { prev = normalizeLinked(JSON.parse(fs.readFileSync(linkFile, 'utf8'))); } catch {}
+          const prevMap = new Map(prev.map(x => [x.id, x]));
+          const rawItems = Array.isArray(body) ? body : (body && body.id ? [body] : []);
+          const list = normalizeLinked(body);
+          if (list.length) {
+            fs.writeFileSync(linkFile, JSON.stringify(list, null, 2));
+            if (u.searchParams.get('dispatch') === '1') {
+              const activeSession = u.searchParams.get('session') || (rawItems[0] && rawItems[0].sessionId) || '';
+              const activeProvider = u.searchParams.get('provider') || (activeSession.startsWith('antigravity:') ? 'antigravity' : (activeSession.startsWith('claude:') ? 'claude' : 'codex'));
+              const targetId = u.searchParams.get('dispatchId') || '';
+              for (const item of list) {
+                if (targetId && item.id !== targetId) continue;
+                const rawItem = rawItems.find(r => r && String(r.id) === item.id) || {};
+                if (rawItem.autoStart === false) continue;
+                dispatchBus.enqueue({
+                  type: 'specialist_start',
+                  provider: rawItem.provider || activeProvider,
+                  sessionId: rawItem.sessionId || activeSession,
+                  prompt: buildSpecialistPrompt(item),
+                  payload: item
+                });
+              }
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(JSON.stringify(list));
+          }
+          if (fs.existsSync(linkFile)) fs.unlinkSync(linkFile);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end('[]');
+        } catch {
+          res.writeHead(400); return res.end('[]');
+        }
+      });
+      return;
+    }
+  }
+  if (u.pathname === '/api/dispatch/poll' && req.method === 'GET') {
+    if (!isLocalAgentRequest(req)) { res.writeHead(403); return res.end('[]'); }
+    const provider = u.searchParams.get('provider') || '';
+    const sessionId = u.searchParams.get('session') || '';
+    const timeoutMs = Math.min(30000, Math.max(500, Number(u.searchParams.get('timeout')) || 15000));
+    dispatchBus.poll({ provider, sessionId }, timeoutMs).then(items => {
+      if (res.destroyed) return;
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(items));
+    }).catch(() => {
+      if (!res.destroyed) { res.writeHead(500); res.end('[]'); }
+    });
+    return;
+  }
+  if (u.pathname === '/api/dispatch/ack' && req.method === 'POST') {
+    if (!isLocalAgentRequest(req)) { res.writeHead(403); return res.end('{}'); }
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        const ok = dispatchBus.ack(body.id, { transport: body.transport || 'bridge' });
+        res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok }));
+      } catch {
+        res.writeHead(400); return res.end('{}');
+      }
+    });
+    return;
+  }
+  if (u.pathname === '/api/plans/pending' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(actionStore.scanReadyPlans()));
+  }
+  if (u.pathname === '/api/plans/clear' && req.method === 'POST') {
+    if (!isLocalAgentRequest(req)) { res.writeHead(403); return res.end('{}'); }
+    try {
+      const pending = actionStore.scanReadyPlans().filter(p => !p.decision);
+      for (const p of pending) {
+        actionStore.recordDecision({ revision: p.revision, file: p.file, sha256: p.sha256, decision: 'rejected' });
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: true, cleared: pending.length }));
+    } catch (err) {
+      res.writeHead(500); return res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
+  }
+  if (u.pathname === '/api/plans/content' && req.method === 'GET') {
+    const rev = u.searchParams.get('rev') || '';
+    const plan = actionStore.readPlanContent(rev);
+    if (!plan) { res.writeHead(404); return res.end('{}'); }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(plan));
+  }
+  if (u.pathname === '/api/actions' && req.method === 'POST') {
+    if (!isLocalAgentRequest(req)) { res.writeHead(403); return res.end('{}'); }
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        const result = actionStore.recordDecision(body);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({
+          ok: true,
+          record: result.record,
+          dispatchedId: result.dispatch && result.dispatch.item ? result.dispatch.item.id : null
+        }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+    });
+    return;
+  }
   if (u.pathname === '/api/agent-events') {
     if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }); return res.end('{}'); }
     if (!isLocalAgentRequest(req)) { res.writeHead(403); return res.end('{}'); }
@@ -111,28 +293,36 @@ http.createServer((req, res) => {
   }
   if (u.pathname === '/api/agent') {
     const parent = u.searchParams.get('parent'), agent = u.searchParams.get('agent');
-    const findSub = (dir) => {
-      let es; try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
-      for (const e of es) {
-        const p = path.join(dir, e.name);
-        if (e.isDirectory()) { const r = findSub(p); if (r) return r; }
-        else if (/^rollout-.*\.jsonl$/.test(e.name)) { const m = ADAPTERS.codex.sessionMeta(p); if (m.parent_thread_id === parent && m.agent_path === agent) return p; }
-      }
-      return null;
-    };
-    const file = findSub(ROOT);
+    const isAg = String(parent || '').startsWith('antigravity:');
+    let file = null;
+    if (isAg) {
+      const m = String(agent || '').match(/__([a-zA-Z0-9-]+)$/);
+      const subId = m ? m[1] : String(agent || '').replace(/^\/root\//, '');
+      file = ADAPTERS.antigravity.resolveFile(ROOTS.antigravity, subId);
+    } else {
+      const findSub = (dir) => {
+        let es; try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+        for (const e of es) {
+          const p = path.join(dir, e.name);
+          if (e.isDirectory()) { const r = findSub(p); if (r) return r; }
+          else if (/^rollout-.*\.jsonl$/.test(e.name)) { const m = ADAPTERS.codex.sessionMeta(p); if (m.parent_thread_id === parent && m.agent_path === agent) return p; }
+        }
+        return null;
+      };
+      file = findSub(ROOT);
+    }
     if (!file) { res.writeHead(404); return res.end('{}'); }
-    const rel = path.relative(ROOT, file).split(path.sep).join('/');
+    const rel = isAg ? String(agent || '') : path.relative(ROOT, file).split(path.sep).join('/');
     const after=Math.max(0,Number(u.searchParams.get('after'))||0),since=Date.parse(u.searchParams.get('since')||''),state={offset:after,pending:Buffer.alloc(0),onRecord:o=>captureImage(rel,o)},records=[];
     const fileSize=fs.statSync(file).size;
-    let ownTurn=u.searchParams.get('own')==='1';
-    for(let i=0;i<1024&&records.length===0&&state.offset<fileSize;i++){
-      const batch=readBatch(file,state);
+    let ownTurn=isAg || u.searchParams.get('own')==='1';
+    for(let i=0;i<1024&&(isAg||records.length===0)&&state.offset<fileSize;i++){
+      const batch=isAg ? readProviderBatch({ adapter: ADAPTERS.antigravity, file }, state) : readBatch(file,state);
       for(const o of batch){
         const p=o.payload||{},attr=p.turn_attribution||p,ts=Date.parse(o.timestamp);
-        if(o.type==='event_msg'&&p.type==='task_started'&&attr.root_turn_id&&attr.turn_id!==attr.root_turn_id)ownTurn=true;
+        if(!isAg&&o.type==='event_msg'&&p.type==='task_started'&&attr.root_turn_id&&attr.turn_id!==attr.root_turn_id)ownTurn=true;
         if(Number.isFinite(since)&&Number.isFinite(ts)&&ts<since-2000)continue;
-        if(ownTurn&&o.type==='response_item'&&/^(function_call|custom_tool_call|function_call_output|custom_tool_call_output|reasoning)$/.test(p.type))records.push(o);
+        if(ownTurn&&((o.type==='response_item'&&/^(function_call|custom_tool_call|function_call_output|custom_tool_call_output|reasoning)$/.test(p.type))||(o.type==='event_msg'&&(p.type==='item_completed'||(p.item&&p.item.type==='SubAgentActivity')))))records.push(o);
       }
     }
     const next=state.offset-state.pending.length,caught=next>=fs.statSync(file).size;
@@ -173,7 +363,24 @@ http.createServer((req, res) => {
       const l = latest(providerFilter)[0];
       if (l && l.f !== f) res.write('event: switch\ndata: ' + JSON.stringify(l.f) + '\n\n');
     }, 3000);
-    req.on('close', () => { clearInterval(t1); clearInterval(t2); });
+    const seenPlans = new Set();
+    const checkPlans = () => {
+      if (res.destroyed) return;
+      try {
+        const plans = actionStore.scanReadyPlans();
+        for (const p of plans) {
+          if (p.decision) continue;
+          const key = p.revision + ':' + p.sha256;
+          if (!seenPlans.has(key)) {
+            seenPlans.add(key);
+            res.write('event: plan_ready\ndata: ' + JSON.stringify(p) + '\n\n');
+          }
+        }
+      } catch {}
+    };
+    checkPlans();
+    const t3 = setInterval(checkPlans, 1500);
+    req.on('close', () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); });
     return;
   }
   res.writeHead(404); res.end();

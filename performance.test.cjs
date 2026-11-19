@@ -86,7 +86,7 @@ assert(geoideArt.startsWith('M')&&geoideArt.endsWith('Z')&&(geoideArt.match(/Q/g
 assert(!cvGridRules.some(rule=>rule.includes('radial-gradient'))&&!/#world::before\{[^}]*radial-gradient/.test(html),'Fundo nao deve ser simulado por gradiente de bolinhas');
 assert(html.includes('grid-coarse')&&html.includes('grid-medium')&&html.includes('grid-fine'),'Grade deve preservar tres densidades por zoom');
 assert(/#world \.n\{[^}]*border-radius:50%[^}]*clip-path:none/i.test(html),'Nos devem manter contorno circular sem clipagem poligonal');
-assert(!/clip-path:\s*polygon/i.test(html),'A arte nao deve transformar os contornos circulares em poligonos');
+assert(!/clip-path:\s*polygon/i.test(html.replace(/#world\s+\.n\.agent\.sp-hub-node\{[^}]*\}/g,'')),'A arte nao deve transformar os contornos circulares em poligonos');
 assert(/#world \.n\.sel::before\{[^}]*border-radius:50%[^}]*animation:orbit-spin 14s steps\(48,end\) infinite/i.test(html),'No selecionado deve recuperar a orbita circular pontilhada girando em passos');
 assert(/prefers-reduced-motion:reduce\)\{[^}]*#world \.n\.sel::before/.test(html),'Orbita selecionada deve parar quando o usuario reduz movimento');
 assert(!html.includes('shape-rendering:crispEdges'),'Glifos e linhas nao devem forcar bordas serrilhadas');
@@ -173,9 +173,9 @@ const staticMeshPath=meshVertical.attrs.d;context.pointerMotion.x=600;context.po
 assert.notEqual(meshVertical.attrs.d,staticMeshPath,'Linhas SVG devem curvar quando o ponteiro entra no campo local');context.pointerMotion.opacity=0;context.drawBackgroundMesh();
 context.sc=1.5;context.applyT(false);assert.equal(context.backgroundGridSpacing(),48,'Zoom aproximado deve adensar a malha');assert(meshAligned(meshVertical.attrs.d,0,48)&&meshAligned(meshHorizontal.attrs.d,1,48),'Malha deve manter o alinhamento de mundo ao aproximar');
 assert.deepEqual(context.steps.map(s=>[s.cx,s.cy]),graphGeometryBefore,'Distorcao da malha nao deve mover nos do historico');assert.equal(elements.get('wg').innerHTML,graphLinksBefore,'Distorcao da malha nao deve modificar os links do historico');
-context.sc=.3;context.updateZoomLabels();assert(context.physics.overview&&cursorWorld.classes.has('grid-coarse')&&elements.get('dotGlyphPattern').attrs.width==='48','Zoom afastado deve usar grade espaçada e mostrar somente pedidos');
+context.sc=.3;context.updateZoomLabels();assert(context.physics.overview&&cursorWorld.classes.has('grid-coarse')&&elements.get('dotGlyphPattern').attrs.width==='18','Zoom afastado deve manter pontos de 18px com linhas espacadas e mostrar somente pedidos');
 assert(Math.abs(Number(elements.get('gridHoverBlur').attrs.stdDeviation)*context.sc-16)<.02,'Borda suave deve manter 16 px de desfoque visual no zoom afastado');
-context.sc=.7;context.updateZoomLabels();assert(!context.physics.overview&&cursorWorld.classes.has('grid-medium')&&elements.get('dotGlyphPattern').attrs.width==='24','Primeiro nivel de zoom deve mostrar todos os nos e grade intermediaria');
+context.sc=.7;context.updateZoomLabels();assert(!context.physics.overview&&cursorWorld.classes.has('grid-medium')&&elements.get('dotGlyphPattern').attrs.width==='18','Primeiro nivel de zoom deve mostrar todos os nos com pontos de 18px e grade intermediaria');
 assert(Math.abs(Number(elements.get('gridHoverBlur').attrs.stdDeviation)*context.sc-16)<.02,'Borda suave deve manter 16 px de desfoque visual no zoom medio');
 context.sc=1.5;context.updateZoomLabels();assert(cursorWorld.classes.has('grid-fine')&&elements.get('dotGlyphPattern').attrs.width==='18','Zoom aproximado deve usar grade fina');
 assert(Math.abs(Number(elements.get('gridHoverBlur').attrs.stdDeviation)*context.sc-16)<.02,'Borda suave deve manter 16 px de desfoque visual no zoom aproximado');context.sc=1;context.updateZoomLabels();

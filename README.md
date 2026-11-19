@@ -12,6 +12,12 @@ O terminal fica separado do Codex CLI; fechar a guia nao encerra o servidor.
 Esta e a copia operacional no repositorio. A pasta original `C:\Users\hreis\Downloads\worklow` foi preservada.
 Instalacao e verificacao: `Repositorio/Infraestrutura/CodexFlowStartup/README.md`.
 
+## Entrega de decisões e especialistas ao Codex
+
+O servidor local grava as aprovações, pedidos de ajuste e vínculos de especialistas na fila de despacho. Para entrega nativa, obtenha o `CODEX_THREAD_ID` da conversa atual e armazene `{ threadId, since }` com a chave `agentFlowCodexBridge` no store de `functions.exec`. Use o horário de início em milissegundos, ou a data do evento específico autorizado para recuperação. Execute o conteúdo de `codex-bridge-runtime.mjs` no runtime de ferramentas. Mantenha um receptor por thread.
+
+O receptor aceita a thread exata ou o arquivo de sessão Codex correspondente. Eventos sem destinatário e de outras conversas ficam na fila. O marcador de entrega só é escrito após aceitação pela ferramenta nativa. O receptor dura enquanto o runtime da conversa estiver ativo. Reiniciar o servidor web não inicia a ponte automaticamente.
+
 Desempenho: somente nos do viewport sao montados; a fisica usa vizinhanca espacial,
 ate 30 atualizacoes/s durante acomodacao e pausa em guia oculta. A distancia muda
 gradualmente no zoom; o movimento desacelera por energia, sem corte por tempo.

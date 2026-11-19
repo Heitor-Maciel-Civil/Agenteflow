@@ -23,9 +23,11 @@ function listSessions(root) {
     const cached = agRowCache.get(file);
     let first = '';
     let activity = st.mtimeMs;
+    let parentId = '';
     if (cached && cached.m === st.mtimeMs && cached.s === st.size) {
       first = cached.first;
       activity = cached.activity;
+      parentId = cached.parentId || '';
     } else {
       try {
         const fd = fs.openSync(file, 'r');
@@ -38,13 +40,20 @@ function listSessions(root) {
             const o = JSON.parse(line);
             const ts = Date.parse(o.created_at);
             if (Number.isFinite(ts)) activity = Math.max(activity, ts);
+            if ((o.type === 'SYSTEM_MESSAGE' || o.type === 'USER_INPUT') && !parentId && typeof o.content === 'string') {
+              const sm = o.content.match(/\[Message\][^\n]*\bsender=([a-zA-Z0-9-]+)/);
+              if (sm) parentId = sm[1];
+            }
             if (o.type === 'USER_INPUT' && !first) {
               first = cleanUserText(o.content || '');
             }
           } catch {}
         }
       } catch {}
-      agRowCache.set(file, { m: st.mtimeMs, s: st.size, first, activity });
+      agRowCache.set(file, { m: st.mtimeMs, s: st.size, first, activity, parentId });
+    }
+    if (parentId && parentId !== d.name && fs.existsSync(path.join(root, parentId, '.system_generated', 'logs', 'transcript.jsonl'))) {
+      continue;
     }
     rows.push({
       provider: 'antigravity',
@@ -74,8 +83,23 @@ function normalizeRecord(record, state) {
   const out = [];
   if (!state._agPendingCalls) state._agPendingCalls = [];
 
-  if (record.type === 'USER_INPUT') {
-    const text = cleanUserText(record.content || '');
+  if (record.type === 'SYSTEM_MESSAGE' || record.type === 'USER_INPUT') {
+    const rawContent = String(record.content || '');
+    const senderMatch = rawContent.match(/\[Message\][^\n]*\bsender=([a-zA-Z0-9_-]+)/);
+    if (senderMatch && state._agActiveAgents && state._agActiveAgents.length) {
+      const senderId = senderMatch[1];
+      const remaining = [];
+      for (const ag of state._agActiveAgents) {
+        if (ag.agent_path && ag.agent_path.endsWith('__' + senderId)) {
+          out.push({ timestamp: ts, type: 'event_msg', payload: { type: 'item_completed', item: { type: 'SubAgentActivity', kind: 'completed', ...ag } } });
+        } else {
+          remaining.push(ag);
+        }
+      }
+      state._agActiveAgents = remaining;
+    }
+    if (record.type === 'SYSTEM_MESSAGE') return out;
+    const text = cleanUserText(rawContent);
     if (text) {
       if (state._agInTurn) {
         out.push({ timestamp: ts, type: 'event_msg', payload: { type: 'task_complete' } });
@@ -116,23 +140,8 @@ function normalizeRecord(record, state) {
           const role = unq(argsObj.Role || argsObj.TypeName) || 'Subagente';
           const typeName = unq(argsObj.TypeName) || 'subagent';
           const slug = role.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'subagent';
-          const agentPath = '/root/' + slug + '_' + callId;
-          state._agActiveAgents = state._agActiveAgents || [];
-          state._agActiveAgents.push({ agent_path: agentPath, task_name: role, agent_name: typeName });
-          out.push({
-            timestamp: ts,
-            type: 'event_msg',
-            payload: {
-              type: 'item_completed',
-              item: {
-                type: 'SubAgentActivity',
-                kind: 'started',
-                agent_path: agentPath,
-                task_name: role,
-                agent_name: typeName
-              }
-            }
-          });
+          state._agSubagentCalls = state._agSubagentCalls || new Map();
+          state._agSubagentCalls.set(callId, { role, typeName, slug });
         }
         out.push({
           timestamp: ts,
@@ -154,12 +163,6 @@ function normalizeRecord(record, state) {
       });
     }
     if (!hasTools && record.status === 'DONE' && state._agInTurn) {
-      if (state._agActiveAgents && state._agActiveAgents.length) {
-        for (const ag of state._agActiveAgents) {
-          out.push({ timestamp: ts, type: 'event_msg', payload: { type: 'item_completed', item: { type: 'SubAgentActivity', kind: 'completed', ...ag } } });
-        }
-        state._agActiveAgents = [];
-      }
       state._agInTurn = false;
       out.push({ timestamp: ts, type: 'event_msg', payload: { type: 'task_complete' } });
     }
@@ -168,13 +171,37 @@ function normalizeRecord(record, state) {
 
   if (record.type === 'GENERIC') {
     const callId = state._agPendingCalls.shift() || ('ag_out_' + (record.step_index ?? 's'));
+    const content = String(record.content || '');
+    if (state._agSubagentCalls && state._agSubagentCalls.has(callId)) {
+      const sub = state._agSubagentCalls.get(callId);
+      state._agSubagentCalls.delete(callId);
+      const cm = content.match(/"conversationId"\s*:\s*"([^"]+)"/);
+      const convId = cm ? cm[1] : callId;
+      const agentPath = '/root/' + sub.slug + '__' + convId;
+      state._agActiveAgents = state._agActiveAgents || [];
+      state._agActiveAgents.push({ agent_path: agentPath, task_name: sub.role, agent_name: sub.typeName });
+      out.push({
+        timestamp: ts,
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: {
+            type: 'SubAgentActivity',
+            kind: 'started',
+            agent_path: agentPath,
+            task_name: sub.role,
+            agent_name: sub.typeName
+          }
+        }
+      });
+    }
     out.push({
       timestamp: ts,
       type: 'response_item',
       payload: {
         type: 'function_call_output',
         call_id: callId,
-        output: String(record.content || '')
+        output: content
       }
     });
   }
